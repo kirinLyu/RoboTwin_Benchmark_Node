@@ -1,0 +1,74 @@
+# RoboTwin benchmark 节点配置（手册 §3.2 参数契约）
+#
+# 常用预设（本文件另存后在对应字段上改）：
+#   stub 冒烟：task_ids "0-1"、init_state_ids "0"、num_runs 1、control_mode qpos
+#              （task 0/1 = adjust_bottle / beat_block_hammer，step_lim 均 400）
+#   真策略 X_VLA 小规模基线：task_ids "0-1"、init_state_ids "0-1"、
+#              control_mode ee + checkpoint 声明（见文件末尾示例）
+#   判据 A 验收：task_ids "0-1"、init_state_ids "0-49"、control_mode ee
+#              + checkpoint 声明（与官方 runner 同口径批次）
+#
+# 另一个模板是 dataflow.example.yaml（dora 拓扑，policy 节点接线见其头注释）。
+
+suite: robotwin                # 固定
+
+# 批次 = task_ids × init_state_ids × num_runs 的笛卡尔积，串行执行。
+# 支持 all / "0-9" / "0,2-4,8" / [0,1,2]；留空或 all = 全部 50 个任务
+# （envs/ 目录自动发现，与官方 eval 的 task_name 同口径）。
+task_ids: "0-1"
+init_state_ids: "0-1"
+num_runs: 1
+
+# 单 episode 步数兜底护栏。RoboTwin 每任务自带 step_lim（env_cfg/task_config/
+# _eval_step_limit.yml，400~1700），到点 env 自己 done；这里必须 ≥ 最大
+# step_lim（1700，put_bottles_dustbin），否则对应任务会被核心提前掐成
+# timed_out，分数口径会变。
+max_steps: 1800
+
+seed: 0
+
+# RoboTwin 仓库根目录（envs/、assets/、env_cfg/ 都在这里）。
+# 缺省时依次取 ROBOTWIN_ROOT 环境变量、~/RoboTwin。
+robotwin_root: /data7/home/shenxin/RoboTwin
+
+# 场景配置：demo_clean（官方 eval 默认）/ demo_randomized（域随机化更激进）。
+task_config: demo_clean
+
+# action 口径（官方 take_action 的 action_type）：qpos = 关节角（官方默认
+# joint）；ee = 末端位姿。维度由 embodiment 推导（每臂 arm_joints_name + 1 夹爪，
+# aloha-agilex = 14D），不硬编码。必须与 policy 输出的动作空间一致。
+control_mode: qpos
+
+# 每 task 的测试场景数（= init state 数）。官方 eval 口径 100；
+# 场景 seed = 100000 * (1 + seed + run_index) + init_state_id（run_index=0 即官方
+# 公式；>0 偏移一个种子域，保证 num_runs>1 产生差异），遇不稳定场景 +1 重试
+# （与官方 eval 同口径，重试不计入分母）。
+test_num: 100
+
+# 必须和 policy 配置里的 policy_id 一致，否则 policy 会忽略我们的命令。
+policy_id: robotwin_policy
+
+# 每个 episode 把该任务的语言指令（description/task_instruction/<task>.json
+# 的 full_description）下发给 policy。关掉等于整批用 policy 配置里的写死
+# 指令推理。
+send_instruction: true
+
+result_dir: results/benchmark
+record_dir: null               # 非空则每 episode 落 mp4（多相机横向拼接）
+
+# 服务模式（默认关闭，保持 autorun 兼容）：
+# serve: true
+# max_total_episodes: 0          # 0 = 不限制；serve 模式的单次 bench.run 护栏
+# max_max_steps: 0               # 0 = 不限制；serve 模式的单次 bench.run 护栏
+
+# 可选：目标 checkpoint 的口径声明。adapter 构造时做启动自检并打进日志
+# （手册 §3.2 / §6-3 / §8-9），与实测观测/动作口径交叉核对，对不上只 WARNING
+# 不拦（分辨率/维度填错只会安静掉分，靠这里人工核对）。官方 X_VLA 例子：
+# checkpoint:
+#   input_features: [3, 224, 224]   # 模型输入形状 [C, H, W]
+#   resize_images_to: [224, 224]    # checkpoint 自带缩放目标（有则喂原生分辨率）
+#   state_dim: 16                   # proprio 维度
+#   state_joints: [left_ee_x, left_ee_y, left_ee_z, left_ee_qw, left_ee_qx,
+#                  left_ee_qy, left_ee_qz, left_gripper, right_ee_x, right_ee_y,
+#                  right_ee_z, right_ee_qw, right_ee_qx, right_ee_qy,
+#                  right_ee_qz, right_gripper]   # proprio 关节名逐字核对

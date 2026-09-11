@@ -1,0 +1,71 @@
+# 两节点评测闭环：benchmark ↔ policy，无中间节点。
+#
+# 用法（在仓库根目录）：
+#   cp config.example.yaml config.yaml    # 按需改批次/口径（预设见 README §3）
+#   export PATH=$DORA_BIN:$PATH            # 两个节点 path 换成本机 $BENCH_PY（README §9）
+#   dora run dataflow.example.yaml
+#
+# policy 节点三套实测接线（替换下面的 policy 节点；换 id 时同步改 benchmark
+# 节点的 inputs.action 为 <新id>/action）：
+#
+# ① stub 冒烟（无策略权重，验时序；benchmark 配置 task_ids "0-1"、
+#    init_state_ids "0"、num_runs 1）：
+#   - id: policy
+#     path: <BENCH_PY>
+#     args: -u stub_policy.py
+#     inputs/outputs 与下面相同
+#
+# ② 真策略 X_VLA（ee 口径出真分；benchmark 配置 control_mode: ee + checkpoint
+#    声明，见 README §2.2）：
+#   - id: real_policy
+#     path: <BENCH_PY>
+#     args: -X faulthandler -u real_policy.py
+#     env:
+#       REAL_POLICY_CONFIG: ./policy_real.yaml   # 内容见 README §3.2
+#       CUDA_VISIBLE_DEVICES: "1"                # benchmark 放另一张 GPU
+#     inputs/outputs 与下面相同
+#
+# ③ 判据 A 验收：同 ②，benchmark 配置 task_ids "0-1"、init_state_ids "0-49"、
+#    control_mode: ee；两节点拆到两张 GPU（README §3.4）
+#
+# 该示例默认是 autorun（config 中 serve 缺省/为 false）。启用 Tool serve 时：
+# 1. 在 config.yaml 设置 serve: true；
+# 2. 在 benchmark 节点 inputs 增加：
+#      bench_cmd: bench_endpoint/bench_cmd
+# 3. 在 outputs 增加 bench_report；bench_endpoint 由独立仓库提供。
+# 旧的 action / benchmark_status / benchmark_result 通道保持不变。
+
+nodes:
+  - id: robotwin_benchmark
+    path: <PY312_WITH_ROBOTWIN>/bin/python
+    args: -u main.py
+    env:
+      BENCHMARK_CONFIG: ./config.yaml
+    inputs:
+      action: policy/action
+    outputs:
+      - proprio_state
+      - image/head
+      - image/left_wrist
+      - image/right_wrist
+      - policy_command
+      - benchmark_status
+      - benchmark_result
+
+  - id: policy
+    path: <POLICY_INFER_BIN>
+    args: infer --config ./policy_robotwin.yaml
+    inputs:
+      tick: dora/timer/millis/20
+      policy_command:
+        source: robotwin_benchmark/policy_command
+        # 必须显式加深：episode 边界会连发 set_instruction + reset_scene，
+        # 默认队列深度会把前一条挤掉，表现为首个 episode 拿着上一句指令跑完——
+        # 照样出分，不报错。
+        queue_size: 32
+      proprio_state: robotwin_benchmark/proprio_state
+      image/head: robotwin_benchmark/image/head
+      image/left_wrist: robotwin_benchmark/image/left_wrist
+      image/right_wrist: robotwin_benchmark/image/right_wrist
+    outputs:
+      - action

@@ -1,0 +1,23 @@
+# 运行产物
+results/
+full_suite_logs/
+full_suite_progress.txt
+config.fullsuite*.yaml
+dataflow_fullsuite*.yaml
+official_*.log
+scratch/
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+build/
+.eggs/
+
+# 虚拟环境
+.venv/
+.venv_build/
+
+# 编辑器 / 系统
+.DS_Store
+*.swp
