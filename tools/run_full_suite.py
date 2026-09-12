@@ -33,17 +33,21 @@ import time
 from pathlib import Path
 
 NODE = Path(
-    os.environ.get("ROBOTWIN_NODE_ROOT")
-    or "/data7/home/shenxin/forge_runtime/packages/nodes/benchmarks/robotwin"
+    os.path.expanduser(
+        os.environ.get("ROBOTWIN_NODE_ROOT")
+        or "~/forge_runtime/packages/nodes/benchmarks/robotwin"
+    )
 )
-ROBOTWIN_ROOT = os.environ.get("ROBOTWIN_ROOT") or "/data7/home/shenxin/RoboTwin"
-MODEL_PATH = os.environ.get("ROBOTWIN_MODEL_PATH") or (
-    "/data7/home/shenxin/robotwin_deps/ckpt/"
-    "RoboTwin-cotrain-aloha_agilex-ee-0/ckpt-30000"
+ROBOTWIN_ROOT = os.path.expanduser(
+    os.environ.get("ROBOTWIN_ROOT") or "~/RoboTwin"
 )
-BENCH_PY = (
+MODEL_PATH = os.path.expanduser(
+    os.environ.get("ROBOTWIN_MODEL_PATH")
+    or "~/robotwin_deps/ckpt/RoboTwin-cotrain-aloha_agilex-ee-0/ckpt-30000"
+)
+BENCH_PY = os.path.expanduser(
     os.environ.get("BENCH_PY")
-    or "/data7/home/shenxin/RoboTwin/.venv-robotwin/bin/python-real"
+    or "~/RoboTwin/.venv-robotwin/bin/python-real"
 )
 LOGS = NODE / "full_suite_logs"
 LOGS.mkdir(parents=True, exist_ok=True)

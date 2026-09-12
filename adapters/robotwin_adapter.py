@@ -5,12 +5,24 @@ benchmark 特有的东西全部收敛在这里；_core 的调度不认识 RoboTw
 benchmark 特有逻辑照抄官方 eval（scripts/eval_policy_xpolicylab.py）的口径：
 
 - 场景重建 = setup_demo(now_ep_num, seed, is_test=True, **task_args)，每次重置整场；
-- seed 口径 = 100000 * (1 + seed + run_index) + init_state_id（run_index=0 即官方
-  公式），遇 UnStableError +1 重试；
+- seed 口径 = 官方顺序种子队列：每 (task, run_index) 一个游标，从
+  `100000 * (1 + seed + run_index)` 起只增不减，接受即推进、跳过不回收——
+  与官方 `now_seed` 游标逐位同语义（run_index>0 偏移一个种子域，供
+  num_runs>1 产生差异）。遇 UnStableError / expert 预筛失败 seed+1 重试；
+- expert_check = 官方专家预筛：setup_demo → play_once() → close_env()，
+  `plan_success and check_success()` 不过则该 seed 跳过；通过后**重新 setup**
+  同一 seed 作为本集正式场景（官方同款两次 setup，eval_policy_xpolicylab.py:805-843）；
+- 指令 = 官方 `seen` 生成式指令：用 play_once 返回的 episode_info 经
+  `generate_episode_descriptions` 填充占位符（官方 build_instruction 同款）；
 - 判定 = env.eval_success（take_action 内部逐 sim step 调 check_success() 置位）；
 - episode 结束 = eval_success or take_action_cnt >= step_lim；
+- env 生命周期 = 官方口径：每集一次 close_env（本实现放在下一集指令阶段开头），
+  换 task 重建 env；
 - 官方 policy server 协议层被 dora 通道替代，本 adapter 只做 env 驱动与转换；
-- 资源记录：后台采样 CPU/GPU 峰值，批次末经 aggregate() 注入结果 JSON。
+- 资源记录：后台采样 CPU/GPU 峰值，批次末经 aggregate() 注入结果 JSON；
+- 场景 seed 台账：每集实际使用的 seed（含重试数）以批次级 ledger 注入结果
+  JSON 的 metrics.scene_seed_ledger——失败集 metrics 必须为空（三态契约），
+  失败集的场景 seed 靠台账补全，供判据 A 的 seed 对齐统计使用。
 """
 
 from __future__ import annotations
@@ -68,8 +80,9 @@ EE_STATE_NAMES = [
 ]
 
 # 官方 eval 的 seed 起点：st_seed = 100000 * (1 + seed)。官方用顺序种子队列
-# （st_seed + 已分配序号，跳过的不回收）；这里用 st_seed + init_state_id 直接
-# 映射——无跳过时两者逐位相同；run_index 偏移由 RobotwinAdapter.scene_seed 处理。
+# （now_seed 游标只增不减：接受即推进，专家预筛/场景不稳跳过的 seed 永不回收）；
+# 本 adapter 同语义，按 (task, run_index) 各维护一个游标，run_index 偏移由
+# _seed_base 处理——修复「init_state_id 直映 + 原地重试」导致的跨集种子碰撞。
 SEED_STRIDE = 100_000
 # 官方 batch eval 默认 max_seed_attempts = test_num * 50；单进程串行用 200 足够。
 MAX_SEED_RETRIES = 200
@@ -257,6 +270,23 @@ class RobotwinAdapter:
         self._env_task: str | None = None
         self._last_scene_seed: int | None = None
         self._last_seed_retries: int = 0
+        # 官方顺序种子队列：{(task_name, run_index): 下一个候选 seed}。
+        # 只增不减——接受与跳过都推进，接受过的 seed 永不重复（官方 now_seed 同语义）。
+        self._seed_cursor: dict[tuple[str, int], int] = {}
+        # 每集实际场景 seed 台账（含失败集；失败集 metrics 必须为空以维持三态
+        # 契约，种子由批次级 ledger 补全）。append 顺序 = episode 计划顺序。
+        self._scene_seed_ledger: list[dict[str, Any]] = []
+        # 已就位的本集场景：(task_name, init_state_id, run_index, seed, retries,
+        # instruction)。由 episode_instruction（官方协议扫描）就位，reset_episode
+        # 消费——runner 先取指令再 reset，指令必须在场景就位后才能生成（seen
+        # 依赖 play_once 的 episode_info），这个顺序是刻意的。
+        self._standing: tuple[str, int, int, int, int, str] | None = None
+        # 指令候选选择用 np.random.choice（官方 build_instruction 同款 API）。
+        # 官方 eval 脚本不 seed 任何 RNG（其指令字符串逐 run 变化，见验收报告
+        # §3.4 的官方自身不确定性）；本节点在构造时按 cfg.seed 固定一次起点，
+        # 使本节点自身的指令选择逐 run 可复现（与官方同分布，实例不逐字一致——
+        # 官方自己也无法逐字一致）。
+        np.random.seed(int(self.cfg.seed))
 
         max_limit = max(self._step_limits.values())
         if self.cfg.max_steps < max_limit:
@@ -354,12 +384,15 @@ class RobotwinAdapter:
             "task_config": self.cfg.task_config,
             "control_mode": self.cfg.control_mode,
             "test_num": self.cfg.test_num,
+            "expert_check": bool(self.cfg.expert_check),
+            "instruction_type": self.cfg.instruction_type,
             "scene_seed": (
-                f"100000 * (1 + {self.cfg.seed} + run_index) + init_state_id，"
-                "UnStableError 时 +1 重试。官方 eval 用顺序种子队列（st_seed + 已分配"
-                "序号，跳过的不回收）；本 adapter 用 init_state_id 直接映射，"
-                "**无跳过时两者逐位相同**，有跳过时该集种子比官方小（场景不同，"
-                "统计意义上等价）；run_index=0 即官方公式，>0 偏移一个种子域"
+                f"官方顺序种子队列：每 (task, run_index) 一个游标，从 "
+                f"100000 * (1 + {self.cfg.seed} + run_index) 起只增不减；"
+                "UnStableError / expert 预筛失败跳过（seed+1 不回收），接受即推进。"
+                "与官方 eval 的 now_seed 游标同语义（run_index=0 时种子域与官方"
+                "逐位相同）；每集实际 seed 与重试数记入结果 JSON 的 "
+                "metrics.scene_seed_ledger（含失败集）"
             ),
             "step_limits": "env_cfg/task_config/_eval_step_limit.yml（每任务 400~1700）",
             "action_layout": (
@@ -370,7 +403,15 @@ class RobotwinAdapter:
             ),
             "camera": "D435（env_cfg/task_config/_camera_config.yml，320x240）",
             "robotwin_root": str(self.root),
-            "instruction": "description/task_instruction/<task>.json 的 full_description",
+            "instruction": (
+                f"官方生成式指令（instruction_type={self.cfg.instruction_type}）："
+                "play_once 的 episode_info → generate_episode_descriptions 填充"
+                "占位符 → np.random.choice 选候选（官方 build_instruction 同款；"
+                "官方 eval 脚本不 seed 任何 RNG，其指令字符串逐 run 变化，本节点按 "
+                "cfg.seed 固定自身选择、逐 run 可复现）。生成失败或 instruction_type="
+                "full_description 时回退 description/task_instruction/<task>.json 的"
+                "full_description"
+            ),
         }
 
     def state_joint_names(self) -> list[str]:
@@ -441,11 +482,159 @@ class RobotwinAdapter:
     def scene_seed(cfg_seed: int, init_state_id: int, run_index: int) -> int:
         """官方公式 + run_index 偏移：100000 * (1 + seed + run_index) + init_state_id。
 
-        run_index=0 时与官方 eval 公式逐位相同（官方口径 = 每 task 100 init × 1
-        run，不受影响）；run_index>0 时偏移到另一个种子域——手册完成标准要求
+        仅作种子域基线公式保留（无跳过时的映射），调度不再用直映——顺序种子
+        队列见 _seed_cursor / episode_instruction。run_index=0 时与官方公式
+        逐位相同；run_index>0 偏移到另一个种子域——手册完成标准要求
         num_runs > 1 必须产生差异，否则多次 run 退化成重复计算。
         """
         return SEED_STRIDE * (1 + int(cfg_seed) + int(run_index)) + int(init_state_id)
+
+    def _seed_base(self, task_name: str, run_index: int) -> int:
+        """(task, run_index) 的种子域起点：100000 * (1 + seed + run_index)。"""
+        return SEED_STRIDE * (1 + int(self.cfg.seed) + int(run_index))
+
+    def _advance_cursor(self, task_name: str, run_index: int) -> int:
+        """返回下一个候选 seed 并推进游标（只增不减，接受与跳过同口径）。"""
+        key = (task_name, run_index)
+        cur = self._seed_cursor.get(key, self._seed_base(task_name, run_index))
+        self._seed_cursor[key] = cur + 1
+        return cur
+
+    def _build_instruction(self, task_name: str, episode_info: dict[str, Any]) -> str:
+        """官方 build_instruction 同款：episode_info → seen/unseen 模板填充。
+
+        episode_info 来自 play_once() 的返回（{"info": {占位符: 场景参数}}，
+        官方 eval_policy_xpolicylab.py:982-986 的 episode_info_list 口径）。
+        候选为空（expert_check 关闭时无 episode_info）回退 full_description。
+        """
+        if self.cfg.instruction_type in ("seen", "unseen") and episode_info:
+            try:
+                # 官方 eval 的导入路径是 description/utils（eval_policy_xpolicylab.py:27）
+                sys.path.insert(0, str(self.root / "description" / "utils"))
+                try:
+                    from generate_episode_instructions import (  # noqa: PLC0415
+                        generate_episode_descriptions,
+                    )
+                finally:
+                    sys.path.remove(str(self.root / "description" / "utils"))
+                # 官方 build_instruction 口径：只取 play_once 返回的 "info" 内层字典
+                results = generate_episode_descriptions(
+                    task_name, [episode_info.get("info", {})], self.cfg.test_num
+                )
+                candidates = results[0].get(self.cfg.instruction_type) if results else []
+                if candidates:
+                    return str(np.random.choice(candidates))
+            except Exception as exc:  # noqa: BLE001 生成失败退回静态指令，不致命
+                print(
+                    f"[robotwin_bench] WARNING: 生成 {self.cfg.instruction_type} 指令失败"
+                    f"（{type(exc).__name__}: {exc}），回退 full_description",
+                    flush=True,
+                )
+        return self._load_language(task_name)
+
+    def episode_instruction(self, task_id: int, init_state_id: int, run_index: int) -> str:
+        """官方协议的整段场景扫描 + 本集指令生成（runner 在 reset 前调用）。
+
+        对应官方 eval 的 while succ_seed < test_num 循环（eval_policy_xpolicylab.py
+        :795-856）：
+          1. 顺序种子队列取候选 seed；
+          2. setup_demo；UnStableError → 跳过（seed+1，不回收）；
+          3. expert_check：play_once() + close_env()，plan_success and
+             check_success() 不过 → 跳过；通过则**重新 setup 同一 seed** 作为
+            本集正式场景（官方同款两次 setup）；
+          4. 正式 setup 再 UnStableError → 跳过；
+          5. 接受：推进游标，场景**留在就位状态**由 reset_episode 消费，
+             用 play_once 的 episode_info 生成 seen 指令。
+        episode 边界关 env（官方每集 close_env，eval_policy_xpolicylab.py:943）。
+        """
+        env = self._ensure_env(task_id)
+        name = self.task_names[task_id]
+        args = self._task_args(name)
+
+        # 每集一次的 env 关闭（官方口径；第一集之前没有旧场景，跳过）。
+        if self._last_scene_seed is not None:
+            try:
+                env.close_env()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[robotwin_bench] WARNING: close_env 失败（忽略）："
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+        from envs.utils.create_actor import UnStableError  # noqa: PLC0415
+
+        attempts = 0
+        while True:
+            seed = self._advance_cursor(name, run_index)
+            retries = seed - self._seed_base(name, run_index)
+            try:
+                env.setup_demo(now_ep_num=int(init_state_id), seed=int(seed), is_test=True, **args)
+            except UnStableError:
+                print(f"[robotwin_bench] skip unstable seed={seed} (expert setup)", flush=True)
+                attempts += 1
+                if attempts >= MAX_SEED_RETRIES:
+                    raise RuntimeError(
+                        f"task {name} init_state {init_state_id}：连续 "
+                        f"{MAX_SEED_RETRIES} 个候选 seed 未通过，放弃"
+                    ) from None
+                continue
+
+            episode_info: dict[str, Any] = {}
+            if self.cfg.expert_check:
+                try:
+                    episode_info = env.play_once()
+                    expert_ok = bool(env.plan_success and env.check_success())
+                except Exception as exc:  # noqa: BLE001 官方对 expert 期异常同样跳过
+                    print(
+                        f"[robotwin_bench] expert check error seed={seed}: "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    expert_ok = False
+                env.close_env()
+                if not expert_ok:
+                    print(f"[robotwin_bench] skip expert-fail seed={seed}", flush=True)
+                    attempts += 1
+                    if attempts >= MAX_SEED_RETRIES:
+                        raise RuntimeError(
+                            f"task {name} init_state {init_state_id}：连续 "
+                            f"{MAX_SEED_RETRIES} 个候选 seed 未通过，放弃"
+                        ) from None
+                    continue
+
+            # 正式场景：官方在 expert 通过后重新 setup 同一个 seed（两步都过才算接受）
+            try:
+                env.setup_demo(now_ep_num=int(init_state_id), seed=int(seed), is_test=True, **args)
+            except UnStableError:
+                print(f"[robotwin_bench] skip unstable seed={seed} (eval setup)", flush=True)
+                attempts += 1
+                if attempts >= MAX_SEED_RETRIES:
+                    raise RuntimeError(
+                        f"task {name} init_state {init_state_id}：连续 "
+                        f"{MAX_SEED_RETRIES} 个候选 seed 未通过，放弃"
+                    ) from None
+                continue
+            except Exception as exc:  # noqa: BLE001 官方对正式 setup 的通用异常也跳过
+                print(f"[robotwin_bench] skip seed={seed} setup error: {type(exc).__name__}: {exc}", flush=True)
+                attempts += 1
+                if attempts >= MAX_SEED_RETRIES:
+                    raise RuntimeError(
+                        f"task {name} init_state {init_state_id}：连续 "
+                        f"{MAX_SEED_RETRIES} 个候选 seed 未通过，放弃"
+                    ) from None
+                continue
+            break
+
+        instruction = self._build_instruction(name, episode_info)
+        self._last_scene_seed = int(seed)
+        self._last_seed_retries = int(retries)
+        self._standing = (name, int(init_state_id), int(run_index), int(seed), int(retries), instruction)
+        print(
+            f"[robotwin_bench] seed accepted task={name} i{init_state_id} "
+            f"r{run_index} seed={seed} retries={retries}",
+            flush=True,
+        )
+        return instruction
 
     def reset_episode(
         self, task_id: int, init_state_id: int, run_index: int, episode_seed: int
@@ -453,34 +642,28 @@ class RobotwinAdapter:
         env = self._ensure_env(task_id)
         name = self.task_names[task_id]
 
-        # 场景 seed：官方 eval 从 100000 * (1 + seed) 起逐 episode 递增，遇
-        # UnStableError 跳过。init_state_id 即"第几个测试场景"。核心给的
-        # episode_seed 只作记录。
-        seed = self.scene_seed(self.cfg.seed, init_state_id, run_index)
-        args = self._task_args(name)
-        retries = 0
-        from envs.utils.create_actor import UnStableError
-
-        while True:
-            try:
-                env.setup_demo(
-                    now_ep_num=int(init_state_id),
-                    seed=int(seed),
-                    is_test=True,
-                    **args,
-                )
-                break
-            except UnStableError:
-                # 官方口径：场景不稳定就跳过、换下一个 seed，不计入分母。
-                seed += 1
-                retries += 1
-                if retries >= MAX_SEED_RETRIES:
-                    raise RuntimeError(
-                        f"task {name} init_state {init_state_id}："
-                        f"连续 {MAX_SEED_RETRIES} 个 seed 场景不稳定，放弃"
-                    ) from None
+        # runner 先调 episode_instruction 取指令、再调本方法 reset（顺序保证），
+        # 场景此时已就位；就位信息不匹配时（异常路径）现场重扫一遍兜底。
+        standing = self._standing
+        if standing is None or standing[:3] != (name, int(init_state_id), int(run_index)):
+            self.episode_instruction(task_id, init_state_id, run_index)
+            standing = self._standing
+        assert standing is not None
+        _, _, _, seed, retries, instruction = standing
+        self._standing = None
         self._last_scene_seed = int(seed)
-        self._last_seed_retries = retries
+        self._last_seed_retries = int(retries)
+        # 场景 seed 台账（含失败集；失败集 metrics 为空，种子由批次级 ledger 补全）。
+        self._scene_seed_ledger.append(
+            {
+                "task_id": int(task_id),
+                "init_state_id": int(init_state_id),
+                "run_index": int(run_index),
+                "scene_seed": int(seed),
+                "seed_retries": int(retries),
+                "instruction": instruction,
+            }
+        )
         return env.get_obs()
 
     def step(self, action: np.ndarray) -> StepOutcome:
@@ -530,7 +713,14 @@ class RobotwinAdapter:
 
     def aggregate(self, episode_metrics: list[dict[str, Any]]) -> tuple[dict, dict]:
         """默认成功率（分母 = 计划总数，与核心 default_aggregate 同口径）+ 资源
-        峰值快照。覆盖 aggregate 钩子只为把资源记录带进结果 JSON 的 metrics。"""
+        峰值快照 + 场景 seed 台账。覆盖 aggregate 钩子只为把资源记录与台账带进
+        结果 JSON 的 metrics。
+
+        台账是失败集场景 seed 的唯一载体：失败集 episode metrics 必须为空（三态
+        契约里 done & !success & 空 metrics = failed），所以不能在逐集 metrics 里
+        带 seed；台账按 episode 计划顺序逐条记录，统计工具按
+        (task_id, init_state_id, run_index) 匹配回各集（含失败集）。
+        """
         successes = sum(
             1 for m in episode_metrics if isinstance(m, dict) and m.get("success")
         )
@@ -543,7 +733,10 @@ class RobotwinAdapter:
             "value": successes / (planned or 1),
             "max": 1.0,
         }
-        return primary, {"resources": self._sampler.stop()}
+        extra: dict[str, Any] = {"resources": self._sampler.stop()}
+        if self._scene_seed_ledger:
+            extra["scene_seed_ledger"] = list(self._scene_seed_ledger)
+        return primary, extra
 
     # ---- 观测转换 ----
 
@@ -639,10 +832,8 @@ class RobotwinAdapter:
         return {name: int(data.get(name, 1000)) for name in self.task_names}
 
     def _load_language(self, task_name: str) -> str:
-        """任务指令：description/task_instruction/<task>.json 的 full_description。
-
-        官方 eval 的 seen/unseen 指令需要数据集里的场景参数做占位符填充，
-        这里用每个任务自带的静态完整描述（无占位符，策略训练分布内）。
+        """静态完整指令（full_description）——seen/unseen 生成失败或
+        instruction_type=full_description 时的回退口径。
         """
         path = self.root / "description" / "task_instruction" / f"{task_name}.json"
         try:

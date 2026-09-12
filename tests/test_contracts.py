@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
+import types
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 import yaml
 
 from config import derive_episode_seed, load_config, resolve_and_validate_plan
@@ -197,3 +202,191 @@ def test_runner_drops_excess_actions() -> None:
     runner.awaiting_action = False  # episode 边界：_record_episode 置 False
     runner.on_action(action)  # 边界处到达的多余 action → 丢弃
     assert adapter.step_calls == 1
+
+
+# ---- 整改新增：官方评测协议回归（报告问题 1/2/3/4/6/7a） ----
+#
+# 测试环境没有 sapien / RoboTwin，adapter 用 object.__new__ 绕过 __init__
+# （chdir/任务发现/采样线程），env 用假件；episode_instruction 内部的
+# `from envs.utils.create_actor import UnStableError` 用注入的假模块满足。
+
+
+class _UnStableError(Exception):
+    """envs.utils.create_actor.UnStableError 的假件（与注入模块同名同义）。"""
+
+
+@pytest.fixture
+def fake_unstable_error():
+    saved = {n: sys.modules.get(n) for n in ("envs", "envs.utils", "envs.utils.create_actor")}
+    mods = {}
+    for name in ("envs", "envs.utils", "envs.utils.create_actor"):
+        mod = types.ModuleType(name)
+        mod.__path__ = []
+        mods[name] = mod
+        sys.modules[name] = mod
+    mods["envs.utils.create_actor"].UnStableError = _UnStableError
+    yield _UnStableError
+    for name, prev in saved.items():
+        if prev is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = prev
+
+
+class _FakeEnv:
+    """记录 setup/close 调用序列的假 env；按 seed 模拟不稳定与 expert 预筛失败。"""
+
+    def __init__(self, unstable=(), expert_fail=()):
+        self.unstable = set(unstable)
+        self.expert_fail = set(expert_fail)
+        self.setup_log: list[int] = []
+        self.close_calls = 0
+        self.plan_success = True
+        self._cur_seed: int | None = None
+
+    def setup_demo(self, now_ep_num, seed, is_test, **args):
+        self._cur_seed = seed
+        self.setup_log.append(seed)
+        if seed in self.unstable:
+            raise _UnStableError(f"unstable {seed}")
+
+    def play_once(self):
+        return {"info": {}}
+
+    def check_success(self):
+        return self._cur_seed not in self.expert_fail
+
+    def close_env(self):
+        self.close_calls += 1
+
+
+def _bare_adapter(**overrides):
+    from adapters.robotwin_adapter import RobotwinAdapter
+
+    adapter = object.__new__(RobotwinAdapter)  # 绕过 __init__（chdir/发现/采样线程）
+    cfg = SimpleNamespace(
+        seed=0,
+        instruction_type="full_description",
+        expert_check=False,
+        test_num=100,
+        max_steps=1800,
+        control_mode="qpos",
+        task_config="demo_clean",
+        robotwin_root=str(ROOT),
+    )
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+    adapter.cfg = cfg
+    adapter.root = Path(cfg.robotwin_root)
+    adapter.task_names = ["adjust_bottle", "beat_block_hammer"]
+    adapter._seed_cursor = {}
+    adapter._scene_seed_ledger = []
+    adapter._standing = None
+    adapter._last_scene_seed = None
+    adapter._last_seed_retries = 0
+    adapter._task_args_cache = {"adjust_bottle": {}, "beat_block_hammer": {}}
+    adapter._task_language_cache = {}
+    adapter._load_language = lambda name: f"desc-{name}"
+    return adapter
+
+
+def test_seed_queue_never_repeats_and_closes_per_episode(fake_unstable_error) -> None:
+    """报告问题 1/7a：顺序种子队列接受过的 seed 永不重复；每集之间 close_env。"""
+    adapter = _bare_adapter()
+    env = _FakeEnv(unstable={100000, 100002, 100003})
+    adapter._env = env
+    adapter._env_task = "adjust_bottle"
+
+    accepted: list[int] = []
+    for init_state_id in range(6):
+        adapter.episode_instruction(0, init_state_id, 0)
+        assert adapter._standing is not None
+        accepted.append(adapter._standing[3])
+        adapter._standing = None  # 模拟 reset_episode 消费就位场景
+
+    assert accepted == sorted(set(accepted))  # 接受过的 seed 永不重复
+    assert len(accepted) == 6
+    assert accepted[0] == 100001  # 100000 不稳定被跳过，游标已推进
+    assert env.close_calls == 5  # 第 2..6 集开头各关一次旧场景（官方每集 close）
+
+
+def test_expert_check_prefilters_and_redoes_setup(fake_unstable_error) -> None:
+    """报告问题 2：expert 预筛不通过的 seed 跳过；通过后重新 setup 同一 seed
+    （官方同款两次 setup：预筛一次 + 正式一次）。"""
+    adapter = _bare_adapter(expert_check=True)
+    env = _FakeEnv(expert_fail={100000})
+    adapter._env = env
+    adapter._env_task = "adjust_bottle"
+
+    instruction = adapter.episode_instruction(0, 0, 0)
+    assert adapter._standing[3] == 100001
+    # 100000：expert setup 一次（预筛失败，无正式 setup）；
+    # 100001：expert setup + 正式 eval setup 各一次。
+    assert env.setup_log == [100000, 100001, 100001]
+    assert env.close_calls == 2  # 两次 play_once 后各关一次
+    assert instruction == "desc-adjust_bottle"  # 空 episode_info → 回退静态指令
+
+
+def test_build_instruction_seen_matches_official_generation() -> None:
+    """报告问题 4：seen 指令 = play_once episode_info 经官方生成器填充占位符。"""
+    robotwin_root = Path(os.path.expanduser("~/RoboTwin"))
+    if not (robotwin_root / "description").is_dir():
+        pytest.skip("RoboTwin 仓库不在本机，跳过 seen 指令生成测试")
+    adapter = _bare_adapter(instruction_type="seen")
+    adapter.root = robotwin_root
+    instruction = adapter._build_instruction(
+        "beat_block_hammer", {"info": {"{A}": "020_hammer/base0", "{a}": "left"}}
+    )
+    assert instruction and "{" not in instruction and "hammer" in instruction
+    # 生成失败/空 episode_info → 回退 full_description
+    assert adapter._build_instruction("beat_block_hammer", {}) == "desc-beat_block_hammer"
+
+
+def test_aggregate_injects_seed_ledger_and_resources() -> None:
+    """报告问题 3/6：失败集 scene seed 经批次级台账进结果 JSON（三态契约不破），
+    资源快照随批次注入。"""
+    adapter = _bare_adapter()
+    adapter._scene_seed_ledger = [
+        {
+            "task_id": 0,
+            "init_state_id": 0,
+            "run_index": 0,
+            "scene_seed": 100001,
+            "seed_retries": 1,
+            "instruction": "desc",
+        }
+    ]
+    adapter.cfg.episode_plan = lambda: [(0, 0, 0), (0, 1, 0)]
+    adapter._sampler = SimpleNamespace(stop=lambda: {"cpu_percent": 12.0})
+
+    primary, extra = adapter.aggregate([{"success": True}, {}])
+    assert primary == {"name": "success_rate", "value": 0.5, "max": 1.0}
+    assert extra["resources"]["cpu_percent"] == 12.0
+    assert extra["scene_seed_ledger"][0]["scene_seed"] == 100001
+    assert extra["scene_seed_ledger"][0]["seed_retries"] == 1
+
+
+def test_config_reads_expert_check_and_instruction_type(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "suite: robotwin\n"
+        f"robotwin_root: {tmp_path}\n"
+        "expert_check: false\n"
+        "instruction_type: unseen\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(config_path)
+    assert cfg.expert_check is False
+    assert cfg.instruction_type == "unseen"
+
+
+def test_config_rejects_bad_instruction_type(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"robotwin_root: {tmp_path}\ninstruction_type: nope\n", encoding="utf-8"
+    )
+    try:
+        load_config(config_path)
+    except ValueError:
+        return
+    raise AssertionError("instruction_type 非法值必须被拒")

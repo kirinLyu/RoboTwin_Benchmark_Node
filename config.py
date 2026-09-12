@@ -32,6 +32,8 @@ resolve_and_validate_plan = _m.resolve_and_validate_plan
 
 # action 口径（官方 take_action 的 action_type）
 CONTROL_MODES = ("qpos", "ee")
+# 指令口径（官方 eval_instruction 的取值 + 本节点扩展的静态回退）
+INSTRUCTION_TYPES = ("seen", "unseen", "full_description")
 
 
 @dataclass
@@ -43,6 +45,13 @@ class RobotwinConfig(BaseBenchmarkConfig):
     control_mode: str = "qpos"
     # 场景配置：demo_clean（官方 eval 默认）/ demo_randomized（域随机化更激进）。
     task_config: str = "demo_clean"
+    # 官方专家预筛（eval_policy_xpolicylab.py 默认 True）：setup_demo →
+    # play_once() → close_env()，plan_success and check_success() 不过则跳过
+    # 该 seed；通过后重新 setup 同一 seed 作为正式场景。
+    expert_check: bool = True
+    # 指令口径：seen / unseen = 官方生成式指令（play_once 的 episode_info 填充
+    # 占位符，官方 build_instruction 同款）；full_description = 静态完整描述回退。
+    instruction_type: str = "seen"
     # 每 task 的测试场景数（= 核心的 init_state 数），官方口径 100。
     test_num: int = 100
     # RoboTwin 仓库根目录（envs/、assets/、env_cfg/ 都在这里）。
@@ -76,14 +85,21 @@ def load_config(path: str | Path) -> RobotwinConfig:
             f"control_mode 必须是 {CONTROL_MODES} 之一，收到 {cfg.control_mode!r}"
         )
     cfg.task_config = str(data.get("task_config", cfg.task_config))
+    cfg.expert_check = bool(data.get("expert_check", cfg.expert_check))
+    cfg.instruction_type = str(
+        data.get("instruction_type", cfg.instruction_type)
+    ).strip().lower()
+    if cfg.instruction_type not in INSTRUCTION_TYPES:
+        raise ValueError(
+            f"instruction_type 必须是 {INSTRUCTION_TYPES} 之一，收到 {cfg.instruction_type!r}"
+        )
     cfg.test_num = int(data.get("test_num", cfg.test_num))
     if cfg.test_num < 1:
         raise ValueError(f"test_num 必须 ≥1，收到 {cfg.test_num}")
 
-    cfg.robotwin_root = str(
-        data.get("robotwin_root")
-        or os.environ.get("ROBOTWIN_ROOT")
-        or os.path.expanduser("~/RoboTwin")
+    # 统一展开 ~：config.yaml 可以写 ~/RoboTwin 这类可移植路径，不必暴露本机绝对路径。
+    cfg.robotwin_root = os.path.expanduser(
+        str(data.get("robotwin_root") or os.environ.get("ROBOTWIN_ROOT") or "~/RoboTwin")
     )
     if not Path(cfg.robotwin_root).is_dir():
         raise ValueError(

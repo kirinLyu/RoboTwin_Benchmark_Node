@@ -28,8 +28,8 @@ max_steps: 1800
 seed: 0
 
 # RoboTwin 仓库根目录（envs/、assets/、env_cfg/ 都在这里）。
-# 缺省时依次取 ROBOTWIN_ROOT 环境变量、~/RoboTwin。
-robotwin_root: /data7/home/shenxin/RoboTwin
+# 缺省时依次取 ROBOTWIN_ROOT 环境变量、~/RoboTwin；~ 会自动展开。
+robotwin_root: ~/RoboTwin
 
 # 场景配置：demo_clean（官方 eval 默认）/ demo_randomized（域随机化更激进）。
 task_config: demo_clean
@@ -39,17 +39,32 @@ task_config: demo_clean
 # aloha-agilex = 14D），不硬编码。必须与 policy 输出的动作空间一致。
 control_mode: qpos
 
-# 每 task 的测试场景数（= init state 数）。官方 eval 口径 100；
-# 场景 seed = 100000 * (1 + seed + run_index) + init_state_id（run_index=0 即官方
-# 公式；>0 偏移一个种子域，保证 num_runs>1 产生差异），遇不稳定场景 +1 重试
-# （与官方 eval 同口径，重试不计入分母）。
+# 每 task 的测试场景数（= init state 数）。官方 eval 口径 100。
+# 场景 seed 不直映 init_state_id，而是官方顺序种子队列：每 (task, run_index)
+# 一个游标，从 100000 * (1 + seed + run_index) 起只增不减；遇场景不稳定
+# （UnStableError）或 expert 预筛失败跳过（seed+1 不回收），接受即推进——
+# 与官方 eval 的 now_seed 游标逐位同语义，接受过的 seed 永不重复。每集实际
+# seed 与重试数记入结果 JSON 的 metrics.scene_seed_ledger（含失败集）。
 test_num: 100
+
+# 官方专家预筛（eval_policy_xpolicylab.py 默认 True）：每个候选 seed 先
+# setup_demo → play_once() → close_env()，plan_success and check_success()
+# 不过则跳过该 seed；通过后重新 setup 同一 seed 作为本集正式场景（官方同款
+# 两次 setup）。关闭则不预筛——此时场景集口径与官方不同，判据 A 对齐不成立。
+expert_check: true
+
+# 指令口径（官方 build_instruction 的取值）：
+#   seen / unseen：play_once 的 episode_info 经 generate_episode_descriptions
+#     填充占位符（官方 eval 默认 seen）；
+#   full_description：静态完整描述（description/task_instruction/<task>.json），
+#     仅作回退口径，与官方评测分布不同。
+instruction_type: seen
 
 # 必须和 policy 配置里的 policy_id 一致，否则 policy 会忽略我们的命令。
 policy_id: robotwin_policy
 
-# 每个 episode 把该任务的语言指令（description/task_instruction/<task>.json
-# 的 full_description）下发给 policy。关掉等于整批用 policy 配置里的写死
+# 每个 episode 把语言指令下发给 policy（内容由 instruction_type 决定：默认
+# seen 生成式指令，与官方 eval 同口径）。关掉等于整批用 policy 配置里的写死
 # 指令推理。
 send_instruction: true
 

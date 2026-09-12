@@ -130,9 +130,9 @@ def main() -> int:
     running = False
     last_command = ""
     # benchmark 的 _publish_obs 先发 proprio_state 再发图像（且 reset_scene 会清
-    # 缓存），所以 proprio 到达时 head 图可能还没到——置位后等 image/head 到达
-    # 再推理。仅当 head 缺失时才推迟；其余时刻用"最新缓存"口径（与 forge
-    # policy 节点的 cache+tick 语义一致）。
+    # 缓存），所以 proprio 到达时 head 图可能还没到——用逐通道帧计数判定
+    # （head_count >= proprio_count 才是当前帧图像），置位后等 image/head 到达
+    # 再推理。避免「新 proprio + 上一步旧 head 图」的混帧输入。
     pending_infer = False
 
     def send_next() -> None:
@@ -169,12 +169,23 @@ def main() -> int:
             "instruction": instruction,
             "env_idx": 0,
         }
+        # 官方 eval 每步 update_obs 一次、chunk 耗尽才 get_action（循环同构：
+        # 见 eval_policy_xpolicylab.py 的 update_obs/get_action 节奏），这里照做。
         model.update_obs(xpl_obs)
-        action_list = model.get_action()
-        if not action_list:
-            raise RuntimeError("Policy returned an empty action chunk.")
-        chunk[:] = [action_to_flat(a) for a in action_list]
-        print(f"[real_policy] 推理完成：chunk={len(chunk)} 步", flush=True)
+        if not chunk:
+            action_list = model.get_action()
+            if not action_list:
+                raise RuntimeError("Policy returned an empty action chunk.")
+            chunk[:] = [action_to_flat(a) for a in action_list]
+            print(f"[real_policy] 推理完成：chunk={len(chunk)} 步", flush=True)
+
+    # 帧对齐计数：每帧恰 1 条 proprio + 1 张 head（逐通道 FIFO）。runner 先发
+    # proprio 再发图像，所以 proprio 到达时缓存里的 head 可能是**上一帧**的——
+    # head_count < proprio_count 说明本帧 head 还在路上，置 pending 等 head 到达
+    # 再推理，杜绝「新 proprio + 旧 head 图」的混帧推理（跨通道乱序下 head 先
+    # 到则 head_count >= proprio_count，直接用当前帧图像，无死锁）。
+    proprio_count = 0
+    head_count = 0
 
     for event in node:
         if event["type"] == "INPUT":
@@ -208,18 +219,20 @@ def main() -> int:
                 obs_cache[event["id"]] = event["value"]
                 if event["id"] == "proprio_state":
                     n_obs += 1
-                    if "image/head" in obs_cache:
-                        if not chunk:
-                            infer_and_queue()
+                    proprio_count += 1
+                    if head_count >= proprio_count:
+                        # 每步 update_obs（官方节奏）；chunk 耗尽才 get_action
+                        infer_and_queue()
                         send_next()
                     else:
-                        # head 图还没到（首帧或跨通道乱序），等 image/head 触发
+                        # 本帧 head 图还没到（首帧或跨通道乱序），等 image/head 触发
                         pending_infer = True
-                elif event["id"] == "image/head" and pending_infer:
-                    pending_infer = False
-                    if not chunk:
+                elif event["id"] == "image/head":
+                    head_count += 1
+                    if pending_infer and head_count >= proprio_count:
+                        pending_infer = False
                         infer_and_queue()
-                    send_next()
+                        send_next()
             elif event["id"] == "tick":
                 pass
         elif event["type"] == "STOP":
