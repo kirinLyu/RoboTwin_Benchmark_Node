@@ -1,0 +1,44 @@
+# G05（Galaxea G0.5）ws policy server 部署配置——官方侧与 Forge 侧共用同一份，
+# 保证判据 A 两侧口径一致（官方 eval 与 Forge 两节点挂同一个 server 协议）。
+#
+# 启动入口：XPolicyLab/policy/G05/setup_eval_policy_server.sh
+#   --config_path 指向本文件；host/port/bench_name/task_name/ckpt_name/
+#   env_cfg_type/seed/policy_name/action_type/action_dim/ckpt_path/g05_root
+#   由 launcher 以 --overrides 注入。
+#
+# 本配置面向 RoboTwin2.0 checkpoint（HF OpenGalaxea/G05 → g05-robotwin20）。
+
+policy_name: G05
+protocol: ws
+host: localhost
+port: 18091
+bench_name: null
+task_name: null
+ckpt_name: null
+env_cfg_type: aloha_agilex        # RoboTwin2.0 双臂；action_dim 由 env_cfg 解析 = 14
+seed: null
+action_type: joint                 # G05 硬性 joint（launcher 会校验非 joint 即退出）
+action_dim: 14
+eval_batch: true
+ws_ping_timeout_s: 120.0
+ws_ping_interval_s: 120.0
+
+# G0.5 仓库与 checkpoint（launcher 以 G05_ROOT / G05_CKPT_PATH 解析覆盖）。
+g05_root: null
+ckpt_path: null
+
+# eval_embodiment 必须与 checkpoint 的 embodiment_type 一致，否则
+# filter_embodiment 抛 ValueError。TODO(下载后必填)：以
+# g05-robotwin20/.hydra/config.yaml 的 embodiment_type 为准填入，例如
+#   eval_embodiment: aloha_agilex
+eval_embodiment: null
+
+# 动作块长与 env 控制频率（official eval 同口径；两侧 frequency 必须同值）。
+action_steps: 16
+frequency: 30
+
+# ar = 离散头 / fm = 连续头；auto 按 checkpoint 的 continuous_action 标志选择
+#（g05-robotwin20 为 fm_only，auto 会落到 fm）。launcher 传 action_source=ar
+# 或 action_source=fm 亦可，同一份文件双用。
+action_source: auto
+hydra_overrides: []

@@ -1,6 +1,6 @@
 [project]
 name = "forge-benchmark-robotwin"
-version = "1.0.0"
+version = "1.1.0"
 description = "Standalone RoboTwin benchmark node for Forge"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -10,6 +10,12 @@ dependencies = [
     "numpy",
     "pyarrow",
     "pyyaml>=6.0",
+    # G05 ws 后端（policy_backend.G05WsBackend）经 XPolicyLab client_server 连
+    # policy server，需要与官方 eval_policy_xpolicylab.py 同款的协议依赖。
+    "websockets>=14.0",
+    "msgpack>=1.0.8",
+    "msgpack-numpy>=0.4.8",
+    "pydantic>=2.5",
     # RoboTwin 与 sapien 由评测环境提供（~/RoboTwin 仓库 + 其 .venv，
     # 见 README 的环境要求），不在此声明，避免把一整套仿真依赖拖进基础节点环境。
 ]

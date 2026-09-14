@@ -5,8 +5,12 @@
 #              （task 0/1 = adjust_bottle / beat_block_hammer，step_lim 均 400）
 #   真策略 X_VLA 小规模基线：task_ids "0-1"、init_state_ids "0-1"、
 #              control_mode ee + checkpoint 声明（见文件末尾示例）
+#   真策略 G05 小规模基线：task_ids "0-1"、init_state_ids "0-1"、
+#              control_mode qpos + checkpoint 声明（见文件末尾 G05 示例）
 #   判据 A 验收：task_ids "0-1"、init_state_ids "0-49"、control_mode ee
 #              + checkpoint 声明（与官方 runner 同口径批次）
+#   G05 判据 A 复验：task_ids "0-1"、init_state_ids "0-49"、control_mode qpos
+#              + checkpoint 声明（官方侧同 checkpoint 同 episodes，README §3.5）
 #
 # 另一个模板是 dataflow.example.yaml（dora 拓扑，policy 节点接线见其头注释）。
 
@@ -87,3 +91,11 @@ record_dir: null               # 非空则每 episode 落 mp4（多相机横向�
 #                  left_ee_qy, left_ee_qz, left_gripper, right_ee_x, right_ee_y,
 #                  right_ee_z, right_ee_qw, right_ee_qx, right_ee_qy,
 #                  right_ee_qz, right_gripper]   # proprio 关节名逐字核对
+# G05（g05-robotwin20）例子（control_mode 必须 qpos）：
+# checkpoint:
+#   input_features: [3, 256, 256]   # 以 ckpt .hydra/config.yaml 的 shape_meta 为准
+#   resize_images_to: [256, 256]
+#   state_dim: 14                   # proprio 维度 = 14D joint
+#   state_joints: [fl_joint1, fl_joint2, fl_joint3, fl_joint4, fl_joint5,
+#                  fl_joint6, fl_joint7, fr_joint1, fr_joint2, fr_joint3,
+#                  fr_joint4, fr_joint5, fr_joint6, fr_joint7]

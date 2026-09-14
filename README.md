@@ -38,7 +38,7 @@ Dora 端口契约（拆仓不改变）：
 | `adapters/robotwin_adapter.py` | ★ RoboTwin 特有逻辑（换 benchmark 只改这里） |
 | `_core/` `bench_tool/` `tests/` | 调度核心 / 服务模式 glue / 契约测试（照搬 benchmark-libero） |
 | `config.example.yaml` `dataflow.example.yaml` | 运行配置与 dora 拓扑模板 |
-| `stub_policy.py` `real_policy.py` | 本地测试 policy（假 policy 冒烟 / X_VLA 真策略薄封装） |
+| `stub_policy.py` `real_policy.py` `policy_backend.py` | 本地测试 policy（假 policy 冒烟 / X_VLA 真策略薄封装 / G05 ws 后端 + obs・action 口径转换） |
 | `tools/` | 全 suite 跑分驱动、判据 A 统计工具 |
 | `code_manifest.txt` | 28 个核心交付文件的 sha256 版本锚点（`sha256sum -c` 应全 OK） |
 
@@ -52,7 +52,8 @@ Dora 端口契约（拆仓不改变）：
 本节点进程内 `import envs`，运行环境须装好 RoboTwin 仿真依赖（sapien 3.0.0b1 /
 torch cu121 / mplib / toppra / trimesh / opencv-headless / gymnasium 等，由评测环境
 提供，**不写进本节点 pyproject**；`uv sync` 只装 dora-rs / forge-msgs / forge-tool /
-numpy / pyarrow / pyyaml）。
+numpy / pyarrow / pyyaml / websockets / msgpack / msgpack-numpy / pydantic——后四者
+是 G05 ws 后端连 XPolicyLab policy server 的协议依赖，官方 eval 同款）。
 
 两个环境分工：
 
@@ -88,6 +89,7 @@ dataflow.yaml       dora 拓扑（见 dataflow.example.yaml）
 | 相机通道 | 硬编码在 adapter（见 §4） | `image_inputs` 的**左键** | `inputs:` 通道名 |
 | proprio 关节名 | 动态读 embodiment 配置 | `state_joints`（对不上静默取空） | — |
 | 动作维度 | `control_mode`（qpos/ee，由 embodiment 推导） | policy 动作空间 | — |
+| G05 ws 后端 | `control_mode: qpos`（G05 硬性 joint 14D） | `backend: g05` + `policy_server_host/port`（§3.4） | policy 节点不占 GPU |
 | 分辨率 | `_camera_config.yml`（D435 320×240） | policy 内部自己 resize | — |
 | 语言指令 | `send_instruction: true` | `policy.instruction`（逐 episode 覆盖） | — |
 
@@ -182,6 +184,62 @@ python tools/acceptance_stats.py --acc-dir <官方日志目录> --forge-dir resu
 由 `metrics.scene_seed_ledger` 补全）与 McNemar 配对检验。判据：CI 重叠且 Fisher
 `p > 0.05`。本仓库验收当次实测见 `docs/RoboTwin_Benchmark_Node_验收记录.md`。
 
+### 3.4 G05 真策略（ws 后端，qpos 口径）
+
+G05（Galaxea G0.5）走 XPolicyLab websocket policy server（官方 eval 同架构）：
+policy 节点只做 env client（`real_policy.py` 的 g05 分支，经 `policy_backend.py`），
+推理在 server 进程的 GPU 上。benchmark 侧**零改动**——`control_mode: qpos` 即官方
+默认 joint 14D 口径。
+
+```bash
+# 0) 起 G05 policy server（官方侧与 Forge 侧各起一个，配置共用同一份）
+#    XPolicyLab/policy/G05/setup_eval_policy_server.sh --config_path \
+#      configs/g05_policy_deploy.yml（host/port/ckpt 由 launcher 注入）
+# 1) benchmark 配置：control_mode: qpos + checkpoint 声明（config.example.yaml
+#    头注释 G05 预设：task_ids "0-1"、init_state_ids "0-1" 先小规模对基线）
+cp config.example.yaml config.g05.yaml       # 改 control_mode: qpos
+cp dataflow.example.yaml dataflow_g05.yaml   # policy 节点换成 ④ 接线（不占 GPU）
+dora run dataflow_g05.yaml
+```
+
+`real_policy.py` 的 g05 配置（env `REAL_POLICY_CONFIG` 指向，policy_g05.yaml）：
+
+```yaml
+policy_id: robotwin_policy     # 必须与 bench 配置一致
+robotwin_root: ~/RoboTwin
+backend: g05                   # xvla（缺省）/ g05
+policy_server_host: localhost
+policy_server_port: 18091
+frequency: 30                  # 与 deploy 的 frequency 同值（官方 eval 同口径）
+request_timeout_s: 300         # 首次推理冷启动留足
+instruction: ""
+```
+
+obs/action 口径照抄官方 `eval_policy_xpolicylab.py`（`policy_backend.py` 逐字段
+同构）：三路相机 → `vision.{cam_head,cam_left_wrist,cam_right_wrist}`；proprio
+14D → `state.{left_arm_joint_state(6),left_ee_joint_state(1),right_arm_joint_state(6),
+right_ee_joint_state(1)}`；动作同序拍平 [左臂6, 左爪1, 右臂6, 右爪1]；节奏为每帧
+`update_obs`、chunk 耗尽才 `get_action`、每集 `reset`。`configs/g05_policy_deploy.yml`
+的 `eval_embodiment` **下载 checkpoint 后必填**（= ckpt `.hydra/config.yaml` 的
+`embodiment_type`，填错 filter_embodiment 直接 ValueError）。
+
+### 3.5 G05 判据 A 复验（官方 runner vs 本节点，qpos）
+
+官方侧在 RoboTwin 仓库根目录跑（G05 ws server + 官方
+`scripts/eval_policy_xpolicylab.py`，`action_type` 缺省即 joint）：
+
+```bash
+python scripts/eval_policy_xpolicylab.py --task_name adjust_bottle \
+  --policy_name G05 --protocol ws --port 18091 --task_config demo_clean \
+  --test_num 50 --seed 0 --additional_info "ckpt_name=g05-robotwin20,action_type=joint"
+```
+
+本节点侧：`config.g05.yaml`（task_ids "0-1"、init_state_ids "0-49"、qpos、
+expert_check + seen）+ `dataflow_g05.yaml`（④ 接线）挂**另一个** G05 server 实例。
+统计判定与 §3.3 同款（`tools/acceptance_stats.py`，判 Wilson/Fisher/McNemar）。
+两侧 `frequency` 必须同值、同 checkpoint、同 task、同 episodes；GPU 账：官方
+server/eval 各一张，Forge server/benchmark 各一张。
+
 ---
 
 ## 4. 代码清单
@@ -195,6 +253,8 @@ _core/  bench_tool/          调度核心 / 服务模式 glue（照搬 LIBERO �
 tests/                       契约测试（照搬 LIBERO 版并适配）
 config.example.yaml          配置模板（全字段带注释）
 dataflow.example.yaml        真策略 dataflow 模板
+policy_backend.py            G05 ws 后端（XPolicyLab 官方 client 薄封装 + obs/action 口径转换）
+configs/g05_policy_deploy.yml G05 policy server 部署配置（官方侧与 Forge 侧共用）
 pyproject.toml               包声明；RoboTwin/sapien 刻意不写进依赖
 ```
 
@@ -285,6 +345,7 @@ adapter 关键单元：
 | stub 时序闭环 | ✅ `obs=1600 act=1600` 锁步；4 集指令交替；JSON 条数一致；4 集全 `failed`（step_lim，metrics 空） |
 | timed_out/failed 分离 | ✅ `max_steps: 5` → 核心掐断 `timed_out`；正常 400 步 → env step_lim 判败 `failed` |
 | 真策略小规模 | ✅ 3/4=0.75 对论文基线；锁步 827/827 |
+| G05 ws 后端契约测试（2026-09-14） | ✅ 后端解析 / qpos 14D 四键切片 / 官方 obs schema 同构 / 动作拍平顺序与别名 / ws 协议假服务器端到端（真 `WsModelClient` 打假 server，msgpack 编码往返核对） |
 | num_runs>1 差异 / 中途取消 / 资源记录 | ✅ 种子 100005 vs 200005 渲染不同；SIGINT 批次 `cancelled` 干净收尾；`metrics.resources` 注入 |
 
 ---
@@ -301,12 +362,14 @@ adapter 关键单元：
 
 ## 9. policy 节点来源与契约
 
-仓库里的 `stub_policy.py` / `real_policy.py` 都是**本地测试件**，不是"未改动的 Forge
-policy 节点"：stub 是零动作假 policy（验时序）；real_policy 是 XPolicyLab X_VLA 的
-dora 薄封装（本机出真分数用），按 Forge policy 通道契约实现（§2 的 `image/*`
-别名、`state_joints`、16D `JointCommand`、1:1 锁步、`policy_command` 四命令、chunk
-边界帧对齐——逐通道帧计数保证推理用同一帧的 proprio + head 图），**不能充当"外部
-policy 节点零改动接入"的验收证据**。
+仓库里的 `stub_policy.py` / `real_policy.py` / `policy_backend.py` 都是**本地测试件**，
+不是"未改动的 Forge policy 节点"：stub 是零动作假 policy（验时序）；real_policy 是
+XPolicyLab X_VLA 的 dora 薄封装（本机出真分数用），按 Forge policy 通道契约实现
+（§2 的 `image/*` 别名、`state_joints`、16D `JointCommand`、1:1 锁步、
+`policy_command` 四命令、chunk 边界帧对齐——逐通道帧计数保证推理用同一帧的
+proprio + head 图）；policy_backend 是其 G05 ws 后端的可测纯函数层（官方
+`WsModelClient` + 官方 obs/action 口径，三路相机齐帧才推理）。两者都**不能充当
+"外部 policy 节点零改动接入"的验收证据**。
 
 接生产 Forge policy 节点时，`dataflow.example.yaml` 里替换 `policy` 节点即可
 （benchmark 节点不动），对齐四件事：① `policy_id` 一致；② `image_inputs` 左键 =
@@ -327,4 +390,6 @@ policy 节点零改动接入"的验收证据**。
 | 同上 | `env.BENCHMARK_CONFIG` | 保持 `./config.*.yaml`，在仓库根执行 dora run |
 | 同上 | `env.CUDA_VISIBLE_DEVICES` | 按机器 GPU 分配调整 |
 | `policy_real.yaml`（自建，§3.2） | `model_path` | X_VLA ckpt-30000 解包目录 |
+| `policy_g05.yaml`（自建，§3.4） | `policy_server_host/port` | G05 ws policy server 地址（与 deploy 的 host/port 一致） |
+| `configs/g05_policy_deploy.yml` | `eval_embodiment` | **下载 checkpoint 后必填**（= ckpt `.hydra/config.yaml` 的 embodiment_type）；`G05_CKPT_PATH` 环境变量兜底 ckpt 路径 |
 | `tools/run_full_suite.py` | 四个路径常量 | `ROBOTWIN_NODE_ROOT` / `ROBOTWIN_ROOT` / `ROBOTWIN_MODEL_PATH` / `BENCH_PY` 环境变量覆盖 |

@@ -28,6 +28,17 @@
 # ③ 判据 A 验收：同 ②，benchmark 配置 task_ids "0-1"、init_state_ids "0-49"、
 #    control_mode: ee；两节点拆到两张 GPU（README §3.4）
 #
+# ④ G05 判据 A 复验（qpos 口径；政策经 websocket 连远端 G05 policy server，
+#    policy 节点本机不占 GPU，推理在 server 的 GPU 上，见 README §3.5）：
+#   - id: real_policy
+#     path: <BENCH_PY>
+#     args: -X faulthandler -u real_policy.py
+#     env:
+#       REAL_POLICY_CONFIG: ./policy_g05.yaml   # 内容见 README §3.5
+#       CUDA_VISIBLE_DEVICES: ""                # 本节点不加载模型，无需 GPU
+#     inputs/outputs 与下面相同
+#   benchmark 配置：task_ids "0-1"、init_state_ids "0-49"、control_mode qpos
+#
 # 该示例默认是 autorun（config 中 serve 缺省/为 false）。启用 Tool serve 时：
 # 1. 在 config.yaml 设置 serve: true；
 # 2. 在 benchmark 节点 inputs 增加：
