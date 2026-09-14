@@ -28,10 +28,9 @@ g05_root: null
 ckpt_path: null
 
 # eval_embodiment 必须与 checkpoint 的 embodiment_type 一致，否则
-# filter_embodiment 抛 ValueError。TODO(下载后必填)：以
-# g05-robotwin20/.hydra/config.yaml 的 embodiment_type 为准填入，例如
-#   eval_embodiment: aloha_agilex
-eval_embodiment: null
+# filter_embodiment 抛 ValueError。g05-robotwin20 的值取自 G05 repo
+# configs/data/robotwin.yaml 的 embodiment_datasets.robotwin.embodiment_type。
+eval_embodiment: robotwin
 
 # 动作块长与 env 控制频率（official eval 同口径；两侧 frequency 必须同值）。
 action_steps: 16

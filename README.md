@@ -152,7 +152,7 @@ dora run dataflow_real.yaml
 
 ```yaml
 policy_id: robotwin_policy     # 必须与 bench 配置一致
-robotwin_root: ~/RoboTwin
+robotwin_root: /path/to/RoboTwin   # 绝对路径！real_policy 不展开 ~（与 benchmark 节点 config 不同）
 model_path: <X_VLA ckpt-30000 解包目录>
 processor_path: null           # 该目录缺 preprocessor_config.json 时填 X-VLA-Pt 基座目录
 steps: 10                      # 去噪步数
@@ -206,7 +206,7 @@ dora run dataflow_g05.yaml
 
 ```yaml
 policy_id: robotwin_policy     # 必须与 bench 配置一致
-robotwin_root: ~/RoboTwin
+robotwin_root: /path/to/RoboTwin   # 绝对路径！real_policy 不展开 ~（与 benchmark 节点 config 不同）
 backend: g05                   # xvla（缺省）/ g05
 policy_server_host: localhost
 policy_server_port: 18091
@@ -220,8 +220,8 @@ obs/action 口径照抄官方 `eval_policy_xpolicylab.py`（`policy_backend.py` 
 14D → `state.{left_arm_joint_state(6),left_ee_joint_state(1),right_arm_joint_state(6),
 right_ee_joint_state(1)}`；动作同序拍平 [左臂6, 左爪1, 右臂6, 右爪1]；节奏为每帧
 `update_obs`、chunk 耗尽才 `get_action`、每集 `reset`。`configs/g05_policy_deploy.yml`
-的 `eval_embodiment` **下载 checkpoint 后必填**（= ckpt `.hydra/config.yaml` 的
-`embodiment_type`，填错 filter_embodiment 直接 ValueError）。
+的 `eval_embodiment` 已按 g05-robotwin20 填好 **robotwin**（= G05 repo
+`configs/data/robotwin.yaml` 的 embodiment_type，填错 filter_embodiment 直接 ValueError）。
 
 ### 3.5 G05 判据 A 复验（官方 runner vs 本节点，qpos）
 
@@ -391,5 +391,5 @@ proprio + head 图）；policy_backend 是其 G05 ws 后端的可测纯函数层
 | 同上 | `env.CUDA_VISIBLE_DEVICES` | 按机器 GPU 分配调整 |
 | `policy_real.yaml`（自建，§3.2） | `model_path` | X_VLA ckpt-30000 解包目录 |
 | `policy_g05.yaml`（自建，§3.4） | `policy_server_host/port` | G05 ws policy server 地址（与 deploy 的 host/port 一致） |
-| `configs/g05_policy_deploy.yml` | `eval_embodiment` | **下载 checkpoint 后必填**（= ckpt `.hydra/config.yaml` 的 embodiment_type）；`G05_CKPT_PATH` 环境变量兜底 ckpt 路径 |
+| `configs/g05_policy_deploy.yml` | `eval_embodiment` | g05-robotwin20 已填 **robotwin**（= G05 repo `configs/data/robotwin.yaml` 的 embodiment_type）；`G05_CKPT_PATH` 环境变量兜底 ckpt 路径 |
 | `tools/run_full_suite.py` | 四个路径常量 | `ROBOTWIN_NODE_ROOT` / `ROBOTWIN_ROOT` / `ROBOTWIN_MODEL_PATH` / `BENCH_PY` 环境变量覆盖 |
