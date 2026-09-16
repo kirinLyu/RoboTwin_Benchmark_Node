@@ -10,6 +10,11 @@
 #
 # 依赖基线：dora-rs==0.4.1、forge-msgs==1.2.0、forge-tool==1.0.0、pyarrow==23.0.1、
 #           pydantic==2.12.5、pyyaml==6.0.3（RoboTwin_benchmark_Node/pyproject.toml）。
+# numpy 特殊：版本必须与宿主评测环境一致（见下方 HOST_NUMPY_VERSION）。宿主
+# scipy/sapien/torch 都是按宿主 numpy 编译的；冻结另一个版本会把两套
+# Fortran/BLAS 运行时（libgfortran/openblas 各自 .libs 副本）混进同一进程
+# → 重计算段错误（2026-09-16 dora 闭环冒烟实测 SIGSEGV，冻结 2.5.3 vs
+# 宿主 1.26.4）。
 # 构建环境：任意 py3.12 宿主环境（含 sapien/torch 供静态分析解析），
 #           例：/data7/home/shenxin/RoboTwin/.venv-robotwin/bin/python。
 #
@@ -48,11 +53,17 @@ trap cleanup EXIT
 
 echo "==> creating isolated PyInstaller environment"
 "$PYTHON_BIN" -m venv --system-site-packages "$BUILD_ENV"
+
+# 冻结 numpy 版本 = 宿主版本（理由见文件头）。取宿主实测版本，不硬编码。
+HOST_NUMPY_VERSION=$("$PYTHON_BIN" -c "import numpy; print(numpy.__version__)")
+echo "==> host numpy version: $HOST_NUMPY_VERSION (frozen numpy pinned to it)"
+
 "$BUILD_ENV/bin/python" -m pip install \
     --disable-pip-version-check \
     --no-input \
     --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
     pyinstaller==6.19.0 \
+    "numpy==${HOST_NUMPY_VERSION}" \
     dora-rs==0.4.1 \
     forge-msgs==1.2.0 \
     forge-tool==1.0.0 \
