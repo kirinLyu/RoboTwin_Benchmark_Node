@@ -61,6 +61,10 @@ def main() -> int:
                     f"instruction={last_instruction!r}",
                     flush=True,
                 )
+                if cmd.command == "stop":
+                    # benchmark 批次结束发 stop：直接退出（daemon 在非 sink 节点
+                    # 正常退出后不广播 STOP，不主动退 dora run 不结束）。
+                    break
             elif event["id"] in OBS_IDS:
                 if event["id"] == "proprio_state":
                     n_obs += 1
