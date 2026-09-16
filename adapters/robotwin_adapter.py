@@ -35,6 +35,74 @@ import threading
 from pathlib import Path
 from typing import Any
 
+# 冻结二进制（PyInstaller onefile）运行时：把评测环境 site-packages 接进
+# sys.path。torch(CUDA)/sapien/cv2/psutil/pynvml 都在包里 excludes（cpu 版
+# torch 会遮蔽 CUDA 版，见 scripts/robotwin_benchmark.spec 冻结边界），必须
+# 从宿主环境拿。注入点必须是本模块而不是 PyInstaller runtime hook：main.py
+# 先导完 _core（冻结的 numpy/pyarrow/forge_msgs 全部进 sys.modules），这里
+# 再挂宿主路径才不会撞车——runtime hook 在启动时注入会让宿主 numpy 与冻结
+# numpy 混装（"cannot load module more than once per process"）。
+# 注入排在 sys.path 末尾：包内冻结模块始终优先。
+if getattr(sys, "frozen", False):
+    _site_candidates = []
+    _explicit_site = os.environ.get("ROBOTWIN_ENV_SITE")
+    if _explicit_site:
+        _site_candidates.append(Path(_explicit_site))
+    _env_root = os.environ.get("ROBOTWIN_ROOT")
+    if _env_root:
+        _site_candidates.append(
+            Path(_env_root)
+            / ".venv-robotwin"
+            / "lib"
+            / f"python{sys.version_info[0]}.{sys.version_info[1]}"
+            / "site-packages"
+        )
+    for _cand in _site_candidates:
+        if _cand.is_dir():
+            _p = str(_cand.resolve())
+            if _p not in sys.path:
+                sys.path.append(_p)
+            # 模拟 site 模块的 .pth 处理：冻结进程不跑 site.py，editable 安装
+            # （实测 nvidia_curobo-0.7.8，源码在 $ROBOTWIN_ROOT/envs/curobo/src）
+            # 注册的 meta_path finder 不会生效。与 site.addpackage 同口径：
+            # import 行 exec（失败不致命），路径行追加 sys.path。
+            for _pth in sorted(_cand.glob("*.pth")):
+                try:
+                    for _line in _pth.read_text(encoding="utf-8").splitlines():
+                        _line = _line.strip()
+                        if not _line or _line.startswith("#"):
+                            continue
+                        if _line.startswith(("import ", "import\t")):
+                            exec(_line)  # noqa: S102 —— .pth 语义就是执行 import 行
+                        elif os.path.isdir(_line):
+                            if _line not in sys.path:
+                                sys.path.append(_line)
+                except Exception:
+                    pass
+            # 宿主 stdlib 一并接上：宿主包会用到冻结 PYZ 没收的 stdlib 模块
+            # （实测 sapien → pkg_resources → plistlib）。venv 的
+            # lib/pythonX.Y 只有 site-packages，stdlib 在 base python
+            # （pyvenv.cfg 的 home）；宿主与构建同为 py3.12 无版本差，且
+            # 冻结导入器在 meta_path 更前，冻结模块始终优先。
+            _stdlib_dirs = []
+            _venv_cfg = _cand.parents[2] / "pyvenv.cfg"
+            if _venv_cfg.exists():
+                for _line in _venv_cfg.read_text(encoding="utf-8").splitlines():
+                    if _line.startswith("home"):
+                        _home = _line.split("=", 1)[1].strip()
+                        _stdlib_dirs.append(
+                            Path(_home).parent
+                            / "lib"
+                            / f"python{sys.version_info[0]}.{sys.version_info[1]}"
+                        )
+                        break
+            _stdlib_dirs.append(_cand.parent)  # conda / 整装 python 布局
+            _stdlib_dirs.append(_cand.parent / "lib-dynload")  # stdlib 扩展模块
+            for _stdlib_dir in _stdlib_dirs:
+                _s = str(_stdlib_dir)
+                if _stdlib_dir.is_dir() and _s not in sys.path:
+                    sys.path.append(_s)
+
 import numpy as np
 import yaml
 

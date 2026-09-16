@@ -3,7 +3,7 @@
 #
 # 冻结进二进制：节点代码 + dora-rs/forge-msgs/forge-tool/numpy/pyarrow/pydantic/pyyaml
 #               + websockets/msgpack/msgpack-numpy（纯 python 依赖）。
-# 留在评测环境（运行时经 pyi_rth_robotwin_site.py 注入 sys.path）：
+# 留在评测环境（运行时由 adapters/robotwin_adapter.py 注入 sys.path）：
 #               torch(CUDA)/sapien/cv2/psutil/pynvml + RoboTwin 仓库（ROBOTWIN_ROOT）。
 # 为什么 torch 连 cpu 版都不进包：RoboTwin envs 用 torch.cuda，cpu 版会遮蔽
 #               CUDA 版（与 libero 配方的唯一刻意偏差，spec 文件头有说明）。
