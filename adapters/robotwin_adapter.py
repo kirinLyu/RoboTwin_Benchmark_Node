@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 import sys
 import threading
 from pathlib import Path
 from typing import Any
+from contextlib import contextmanager
 
 # 冻结二进制（PyInstaller onefile）运行时：把评测环境 site-packages 接进
 # sys.path。torch(CUDA)/sapien/cv2/psutil/pynvml 都在包里 excludes（cpu 版
@@ -105,6 +107,19 @@ if getattr(sys, "frozen", False):
 
 import numpy as np
 import yaml
+
+
+@contextmanager
+def _instruction_rng(scene_seed: int):
+    """Seed upstream template shuffling and selection without changing physics RNG."""
+    python_state, numpy_state = random.getstate(), np.random.get_state()
+    try:
+        random.seed(int(scene_seed))
+        np.random.seed(int(scene_seed) & 0xFFFFFFFF)
+        yield
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
 
 try:
     import psutil
@@ -191,10 +206,17 @@ class _ResourceSampler:
 
     @staticmethod
     def _pick_gpu_sampler():
+        # nvidia-smi/NVML use physical IDs, unlike torch's CUDA-visible ordinals.
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        selected = visible.split(",", 1)[0].strip() if visible is not None else "0"
+        if selected in ("", "-1"):
+            return lambda: (None, None)
+
         def via_nvidia_smi() -> tuple[float | None, float | None]:
             out = subprocess.run(
                 [
                     "nvidia-smi",
+                    f"--id={selected}",
                     "--query-gpu=utilization.gpu,memory.used",
                     "--format=csv,noheader,nounits",
                 ],
@@ -224,7 +246,11 @@ class _ResourceSampler:
             import pynvml  # type: ignore
 
             pynvml.nvmlInit()
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            handle = (
+                pynvml.nvmlDeviceGetHandleByIndex(int(selected))
+                if selected.isdigit()
+                else pynvml.nvmlDeviceGetHandleByUUID(selected)
+            )
 
             def via_pynvml() -> tuple[float | None, float | None]:
                 try:
@@ -271,6 +297,13 @@ class _ResourceSampler:
         with self._lock:
             return dict(self._peaks)
 
+    def reset(self) -> None:
+        """Start resource accounting for a new batch without retaining old peaks."""
+        self.stop()
+        with self._lock:
+            self._peaks = dict.fromkeys(self._peaks)
+        self.start()
+
     def _run(self) -> None:
         proc = psutil.Process() if psutil is not None else None
         gpu_every = max(1, int(5.0 / max(self._interval, 0.1)))
@@ -304,6 +337,27 @@ class _ResourceSampler:
 
 class RobotwinAdapter:
     """进程内持有 RoboTwin env，不经过 XPolicyLab / policy server。"""
+
+    @property
+    def cfg(self):
+        return self._cfg
+
+    @cfg.setter
+    def cfg(self, value):
+        previous = getattr(self, "_cfg", None)
+        self._cfg = value
+        # BenchSession already assigns a fresh cloned config for each accepted
+        # batch. Use that boundary without changing the shared Core protocol.
+        if previous is None or value is previous or not hasattr(self, "_seed_cursor"):
+            return
+        self._seed_cursor.clear()
+        self._scene_seed_ledger.clear()
+        self._standing = None
+        self._last_seed_retries = 0
+        np.random.seed(int(value.seed))
+        self._sampler.reset()
+        # Preserve _last_scene_seed: episode_instruction must close the previous
+        # live scene before setting up the first scene of this new batch.
 
     SUCCESS_SOURCE = "env.eval_success"
 
@@ -476,7 +530,7 @@ class RobotwinAdapter:
                 "play_once 的 episode_info → generate_episode_descriptions 填充"
                 "占位符 → np.random.choice 选候选（官方 build_instruction 同款；"
                 "官方 eval 脚本不 seed 任何 RNG，其指令字符串逐 run 变化，本节点按 "
-                "cfg.seed 固定自身选择、逐 run 可复现）。生成失败或 instruction_type="
+                "实际 scene_seed 固定 Python/NumPy 指令随机数、逐 run 可复现）。生成失败或 instruction_type="
                 "full_description 时回退 description/task_instruction/<task>.json 的"
                 "full_description"
             ),
@@ -693,7 +747,11 @@ class RobotwinAdapter:
                 continue
             break
 
-        instruction = self._build_instruction(name, episode_info)
+        # The upstream generator also uses Python random.choice/shuffle before
+        # NumPy selects a candidate. Seeding only NumPy at startup cannot replay
+        # instructions across Sessions or differing simulator initialization.
+        with _instruction_rng(seed):
+            instruction = self._build_instruction(name, episode_info)
         self._last_scene_seed = int(seed)
         self._last_seed_retries = int(retries)
         self._standing = (name, int(init_state_id), int(run_index), int(seed), int(retries), instruction)

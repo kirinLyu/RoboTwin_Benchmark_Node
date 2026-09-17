@@ -38,8 +38,8 @@ def _fake_cameras() -> dict[str, np.ndarray]:
 
 
 class TestResolveBackend:
-    def test_default_is_xvla(self) -> None:
-        assert resolve_backend({}) == "xvla"
+    def test_default_matches_shipped_g05_binary(self) -> None:
+        assert resolve_backend({}) == "g05"
         assert resolve_backend({"backend": "xvla"}) == "xvla"
 
     def test_g05_case_insensitive(self) -> None:
@@ -238,7 +238,7 @@ class TestG05WsBackendAgainstFakeServer:
     ]
 
     def test_end_to_end(self) -> None:
-        robotwin_root = Path(os.path.expanduser("~/RoboTwin"))
+        robotwin_root = Path(os.environ.get("ROBOTWIN_ROOT", "~/RoboTwin")).expanduser()
         xpl = robotwin_root / "XPolicyLab"
         if not (xpl / "client_server" / "ws" / "model_client.py").exists():
             pytest.skip("RoboTwin/XPolicyLab 仓库不在本机，跳过 ws 集成测试")

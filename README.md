@@ -1,3 +1,5 @@
+> **PAOS Ubuntu 20.04 integration (2026-09-17):** See [current release scope and build instructions](docs/PAOS_UBUNTU20.md) and [Skill sources](skills/robotwin-benchmark/SKILL.md). Historical evaluation statements below belong to the upstream student snapshot; they are not new acceptance evidence for this release.
+
 # RoboTwin Benchmark 节点
 
 把 RoboTwin 包一层的 Dora 节点。进程内持有 RoboTwin env，只做测评：批次展开 → 逐 episode 跑 → 结果落盘。不经过 XPolicyLab / policy server；判定、动作、重置全走 RoboTwin 官方接口，口径照抄官方 eval 脚本 `scripts/eval_policy_xpolicylab.py`。

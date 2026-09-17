@@ -1,0 +1,5 @@
+backend: g05
+policy_id: robotwin_policy
+frequency: 30
+request_timeout_s: 300
+max_connect_seconds: 60

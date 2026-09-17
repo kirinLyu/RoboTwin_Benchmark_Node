@@ -1,0 +1,80 @@
+nodes:
+- id: gateway
+  path: ${FORGE_RUNTIME_BIN}/gateway
+  args: --config gateway.yaml
+  inputs:
+    tick: dora/timer/millis/50
+    benchmark_tool_in:
+      source: robotwin_benchmark/tool_out
+      queue_size: 32
+    policy_tool_in:
+      source: robotwin_policy/tool_out
+      queue_size: 32
+  outputs:
+  - tool_response
+  - benchmark_tool_out
+  - policy_tool_out
+- id: robotwin_benchmark
+  path: ${FORGE_RUNTIME_BIN}/robotwin_benchmark
+  env:
+    ROBOTWIN_ROOT: ${ROBOTWIN_ROOT}
+    ROBOTWIN_ENV_SITE: ${ROBOTWIN_ENV_SITE}
+    G05_SERVER_URL: ${G05_SERVER_URL}
+    CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}
+    PYOPENGL_PLATFORM: egl
+    MUJOCO_GL: egl
+    BENCHMARK_CONFIG: benchmark.yaml
+  inputs:
+    tick: dora/timer/millis/1000
+    tool_in:
+      source: gateway/benchmark_tool_out
+      queue_size: 32
+    action:
+      source: robotwin_policy/action
+      queue_size: 32
+  outputs:
+  - tool_out
+  - proprio_state
+  - image/head
+  - image/left_wrist
+  - image/right_wrist
+  - policy_command
+  - benchmark_status
+  - benchmark_result
+- id: robotwin_policy
+  path: ${FORGE_RUNTIME_BIN}/robotwin_policy
+  env:
+    ROBOTWIN_ROOT: ${ROBOTWIN_ROOT}
+    ROBOTWIN_ENV_SITE: ${ROBOTWIN_ENV_SITE}
+    G05_SERVER_URL: ${G05_SERVER_URL}
+    CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}
+    PYOPENGL_PLATFORM: egl
+    MUJOCO_GL: egl
+    POLICY_ID: robotwin_policy
+    POLICY_TOOL_ENABLED: '1'
+    POLICY_DEVICE: cuda:0
+    POLICY_SEED: '0'
+    REAL_POLICY_CONFIG: policy.yaml
+  inputs:
+    tick: dora/timer/millis/1000
+    tool_in:
+      source: gateway/policy_tool_out
+      queue_size: 32
+    policy_command:
+      source: robotwin_benchmark/policy_command
+      queue_size: 32
+    proprio_state:
+      source: robotwin_benchmark/proprio_state
+      queue_size: 32
+    image/head:
+      source: robotwin_benchmark/image/head
+      queue_size: 32
+    image/left_wrist:
+      source: robotwin_benchmark/image/left_wrist
+      queue_size: 32
+    image/right_wrist:
+      source: robotwin_benchmark/image/right_wrist
+      queue_size: 32
+  outputs:
+  - tool_out
+  - action

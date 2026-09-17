@@ -30,7 +30,10 @@ from PyInstaller.utils.hooks import (
 
 
 _node_root = Path(os.environ["ROBOTWIN_NODE_ROOT"]).resolve()
-_entry = _node_root / "scripts" / "entrypoint.py"
+_kind = os.environ.get("ROBOTWIN_NODE_KIND", "benchmark")
+if _kind not in ("benchmark", "policy"):
+    raise ValueError(f"Invalid node kind: {_kind}")
+_entry = _node_root / "scripts" / ("policy_entrypoint.py" if _kind == "policy" else "entrypoint.py")
 _hooks = _node_root / "scripts" / "hooks"
 
 
@@ -167,7 +170,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="robotwin_benchmark",
+    name=f"robotwin_{_kind}",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

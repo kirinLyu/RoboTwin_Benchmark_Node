@@ -28,7 +28,7 @@ chunk 耗尽再推理一次（官方 eval 同语义）。
 g05 后端（backend: g05，见 _run_g05）：经 policy_backend.G05WsBackend 连
 XPolicyLab websocket policy server（官方 eval_policy_xpolicylab.py 同款
 client 与 obs/action 口径），joint 14D [左臂6, 左爪1, 右臂6, 右爪1]，三路
-相机齐帧才推理。缺省 backend=xvla 时上面整段 xvla 路径逐行不变。
+相机齐帧才推理。缺省 backend=g05；X-VLA 通过 backend: xvla 显式启用。
 """
 
 from __future__ import annotations
@@ -72,7 +72,11 @@ def load_cfg() -> dict[str, Any]:
     path = os.environ.get("REAL_POLICY_CONFIG")
     if not path:
         raise RuntimeError("REAL_POLICY_CONFIG 环境变量未设置")
-    return yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    cfg["robotwin_root"] = str(Path(cfg.get("robotwin_root") or os.environ["ROBOTWIN_ROOT"]).expanduser().resolve())
+    if os.environ.get("G05_SERVER_URL"):
+        cfg["policy_server_url"] = os.environ["G05_SERVER_URL"]
+    return cfg
 
 
 def setup_sys_path(robotwin_root: str) -> None:
@@ -132,135 +136,9 @@ def action_to_flat(action: dict[str, Any]) -> np.ndarray:
 
 
 def _run_g05(cfg: dict[str, Any]) -> int:
-    """g05 后端：经 G05WsBackend 连 XPolicyLab ws policy server，joint 14D。
-
-    调用节奏与官方 eval_policy_xpolicylab.py 同构：每帧 update_obs、chunk
-    耗尽才 get_action、每集 reset。obs 口径由 policy_backend.build_xpl_obs
-    逐字段对齐官方 robotwin_obs_to_xpolicylab（三路相机 + 14D joint state）。
-    """
-    backend = G05WsBackend(cfg, cfg["robotwin_root"])
-    backend.connect()
-
-    node = Node()
-    n_obs = 0
-    n_act = 0
-    chunk: list[np.ndarray] = []
-    obs_cache: dict[str, Any] = {}
-    # 名字沿用 proprio_state 通道（= benchmark 侧 state_joint_names），位置是契约。
-    action_names: list[str] = []
-    instruction = str(cfg.get("instruction", ""))
-    running = False
-    last_command = ""
-    pending_infer = False
-
-    def send_next() -> None:
-        nonlocal chunk, n_act
-        action = chunk.pop(0)
-        if action.size != G05_ACTION_DIM or not np.all(np.isfinite(action)):
-            raise RuntimeError(f"动作维度/数值异常：shape={action.shape}")
-        node.send_output(
-            "action",
-            JointCommand.from_np(action, action_names, "position").to_arrow(),
-        )
-        n_act += 1
-
-    def infer_and_queue() -> None:
-        nonlocal chunk, action_names
-        for ch in ("proprio_state", *CAM_CHANNEL_TO_XPL):
-            if ch not in obs_cache:
-                raise RuntimeError(f"{ch} 观测缺失")
-        state_msg = JointState.from_arrow(obs_cache["proprio_state"])
-        values = np.asarray(state_msg.position, dtype=np.float64).reshape(-1)
-        names = list(state_msg.name)
-        if len(values) != G05_ACTION_DIM or len(names) != G05_ACTION_DIM:
-            raise RuntimeError(
-                f"proprio 维度不对：{len(values)}D（期望 {G05_ACTION_DIM}D）——"
-                f"benchmark 侧 control_mode 是否设为 qpos？"
-            )
-        cameras = {
-            ch: ForgeImage.from_arrow(obs_cache[ch]).to_numpy()
-            for ch in CAM_CHANNEL_TO_XPL
-        }
-        xpl_obs = build_xpl_obs(
-            cameras,
-            qpos_state_to_dict(values, names),
-            instruction,
-            frequency=int(cfg.get("frequency", 30)),
-        )
-        # 官方节奏：每帧 update_obs、chunk 耗尽才 get_action。
-        backend.update_obs(xpl_obs)
-        if not chunk:
-            steps = backend.get_action()
-            chunk[:] = [pack_g05_action(s) for s in steps]
-            action_names = names
-            print(f"[real_policy] 推理完成：chunk={len(chunk)} 步", flush=True)
-
-    # 帧对齐计数：每帧恰 1 条 proprio + 三路相机各 1 张（逐通道 FIFO）。G05
-    # 需要全部三路图，三路齐帧才推理；机制与 xvla 路径同（置 pending 等图）。
-    proprio_count = 0
-    cam_counts: dict[str, int] = {ch: 0 for ch in CAM_CHANNEL_TO_XPL}
-
-    def frame_ready() -> bool:
-        return all(cam_counts[ch] >= proprio_count for ch in CAM_CHANNEL_TO_XPL)
-
-    for event in node:
-        if event["type"] == "INPUT":
-            if event["id"] == "policy_command":
-                cmd = PolicyCommand.from_arrow(event["value"])
-                if cmd.policy_id != cfg["policy_id"]:
-                    print(
-                        f"[real_policy] 忽略 policy_id 不匹配的命令："
-                        f"{cmd.policy_id} != {cfg['policy_id']}",
-                        flush=True,
-                    )
-                    continue
-                if cmd.command == "start":
-                    running = True
-                elif cmd.command == "set_instruction":
-                    instruction = str(cmd.inputs().get("instruction", instruction))
-                elif cmd.command == "reset_scene":
-                    # 官方 reset_policy 同语义：清本地队列与缓存 + 通知政策。
-                    chunk.clear()
-                    obs_cache.clear()
-                    pending_infer = False
-                    backend.reset()
-                elif cmd.command == "stop":
-                    running = False
-                last_command = cmd.command
-                print(
-                    f"[real_policy] command={cmd.command} running={running} "
-                    f"instruction={instruction!r}",
-                    flush=True,
-                )
-            elif event["id"] in OBS_IDS:
-                obs_cache[event["id"]] = event["value"]
-                if event["id"] == "proprio_state":
-                    n_obs += 1
-                    proprio_count += 1
-                    if frame_ready():
-                        infer_and_queue()
-                        send_next()
-                    else:
-                        # 本帧相机图还没到齐（首帧或跨通道乱序），等图触发
-                        pending_infer = True
-                elif event["id"] in CAM_CHANNEL_TO_XPL:
-                    cam_counts[event["id"]] += 1
-                    if pending_infer and frame_ready():
-                        pending_infer = False
-                        infer_and_queue()
-                        send_next()
-            elif event["id"] == "tick":
-                pass
-        elif event["type"] == "STOP":
-            break
-
-    backend.close()
-    print(
-        f"[real_policy] obs={n_obs} act={n_act} (1:1 锁步: {n_obs == n_act}) "
-        f"last_command={last_command}",
-        flush=True,
-    )
-    return 0
+    """Source-complete G05 lifecycle shared by source and packaged execution."""
+    from g05_node import run_g05
+    return run_g05(cfg)
 
 
 def main() -> int:

@@ -1,0 +1,58 @@
+manifest_version: 2
+name: robotwin-benchmark
+version: 0.1.0
+description: Run the ROBOTWIN benchmark through Forge Query/Session tools.
+skill_document: SKILL.md
+gateway_url: http://127.0.0.1:19132
+required_tools:
+- robotwin.benchmark.describe
+- robotwin.benchmark.run
+- robotwin.policy.describe
+profiles:
+  g05_external:
+    dataflow: profiles/g05_external/dataflow.yaml
+    startup_timeout_s: 900
+    required_binaries:
+    - gateway
+    - robotwin_benchmark
+    - robotwin_policy
+    required_assets:
+    - profiles/g05_external/gateway.yaml
+    - profiles/g05_external/benchmark.yaml
+    - profiles/g05_external/policy.yaml
+    required_environment:
+    - ROBOTWIN_ROOT
+    - ROBOTWIN_ENV_SITE
+    - ROBOTWIN_PYTHON
+    - G05_SERVER_URL
+    - CUDA_VISIBLE_DEVICES
+    environment:
+      PYOPENGL_PLATFORM: egl
+      MUJOCO_GL: egl
+artifacts:
+  resolver: registry
+  nodes:
+    gateway:
+      artifact_id: gateway-1.1.0-linux-x86_64
+      version: 1.1.0
+      platform: linux
+      arch: x86_64
+      artifact_type: executable_tar_gz
+      entrypoint: gateway
+      sha256: bb42c141b299a854fed2ff31f20be5b83551c7c47a30bce06fccd717da202387
+    robotwin_benchmark:
+      artifact_id: robotwin_benchmark-1.1.4-linux-x86_64
+      version: 1.1.4
+      platform: linux
+      arch: x86_64
+      artifact_type: executable_tar_gz
+      entrypoint: robotwin_benchmark
+      sha256: a2dbef5a709d46ce6f68acc8f5399f0333a5aa67b00b4d9b07f22326b95202e7
+    robotwin_policy:
+      artifact_id: robotwin_policy-1.1.1-linux-x86_64
+      version: 1.1.1
+      platform: linux
+      arch: x86_64
+      artifact_type: executable_tar_gz
+      entrypoint: robotwin_policy
+      sha256: f7d6455bd77461aaf3e7a38f11bf626825701299c06ce68cc9d1392cae69b1de

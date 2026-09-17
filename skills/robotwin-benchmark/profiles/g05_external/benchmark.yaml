@@ -1,0 +1,20 @@
+benchmark: robotwin
+suite: robotwin
+serve: true
+policy_id: robotwin_policy
+task_ids:
+- 0
+init_state_ids:
+- 0
+num_runs: 1
+seed: 0
+send_instruction: true
+result_dir: results
+max_total_episodes: 1000
+max_max_steps: 1800
+control_mode: qpos
+task_config: demo_clean
+expert_check: true
+instruction_type: seen
+test_num: 100
+max_steps: 1800

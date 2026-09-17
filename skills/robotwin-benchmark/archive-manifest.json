@@ -1,0 +1,59 @@
+{
+  "files": [
+    {
+      "path": "HOST_RUNTIME.md",
+      "size": 3186,
+      "sha256": "a0b1269604520550c4414f6d6263789eb6df7ee778c578bc10a96a60b912082f"
+    },
+    {
+      "path": "profiles/g05_external/benchmark.yaml",
+      "size": 332,
+      "sha256": "8b16dc3346f80bc6e8339a6bf6e16fedfbe5b31f05b78d255fe8401e1927f034"
+    },
+    {
+      "path": "profiles/g05_external/dataflow.yaml",
+      "size": 2073,
+      "sha256": "2496a7d74759b18e3e08251a3ea7f57259998259f82d1a905b32a5dcb066e28d"
+    },
+    {
+      "path": "profiles/g05_external/gateway.yaml",
+      "size": 4085,
+      "sha256": "2b9a3aba26e0f6d4e9c14ae8080f8d8f47f07911994e2f780f28e5aa9e7e7e47"
+    },
+    {
+      "path": "profiles/g05_external/policy.yaml",
+      "size": 101,
+      "sha256": "c44d758565b949607b40e398d9077ce11ea689b8797b2685b9c14e829277baca"
+    },
+    {
+      "path": "README.md",
+      "size": 1157,
+      "sha256": "3880c149698061ff4ad91662d0e47690fe8c0d8eaa596c97aba10f4dbb1180de"
+    },
+    {
+      "path": "scripts/preflight.py",
+      "size": 3031,
+      "sha256": "5d3c81bb019a3b8748dddaab0fb263c00a27d2824118628abd379600a76c21a3"
+    },
+    {
+      "path": "SKILL.md",
+      "size": 1867,
+      "sha256": "dfc9bdba8756e03cc7b085addf79ce0a17e8479f828e5c18b0911fe2b58f86d7"
+    },
+    {
+      "path": "skill.yaml",
+      "size": 1726,
+      "sha256": "06a5d69552b42d5fce0473df261043b24ac67929f73f5e66a11b76eb5d0e2f78"
+    },
+    {
+      "path": "start.sh",
+      "size": 255,
+      "sha256": "97ca5994deb30401bdf58229ac687e577f28b064206ec7d9d7571499c76aa172"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "size": 563,
+      "sha256": "94b2295ae529db84e8d2eef3de8c8e85fd7ae2e15675a54f8c754e531da3d4d6"
+    }
+  ]
+}

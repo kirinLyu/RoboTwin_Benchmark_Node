@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -61,8 +62,8 @@ _ACTION_KEY_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def resolve_backend(cfg: dict[str, Any]) -> str:
-    """policy 后端选择：缺省 xvla（旧行为），未知值报错。"""
-    backend = str(cfg.get("backend", "xvla")).strip().lower()
+    """缺省 G05，与已交付包一致；X-VLA 必须显式选取。"""
+    backend = str(cfg.get("backend", "g05")).strip().lower()
     if backend not in BACKENDS:
         raise ValueError(f"未知 policy 后端：{backend!r}（可选 {BACKENDS}）")
     return backend
@@ -151,7 +152,7 @@ class G05WsBackend:
                 "G05 ws 后端需要 policy_server_url 或 policy_server_host/port"
             )
         self._url = url or f"ws://{host}:{int(port)}"
-        self._robotwin_root = str(Path(robotwin_root).resolve())
+        self._robotwin_root = str(Path(robotwin_root).expanduser().resolve())
         self._kwargs = {
             "evaluation_id": str(cfg.get("evaluation_id", "robotwin-eval")),
             "trial_id": str(cfg.get("trial_id", "robotwin-trial")),
@@ -164,6 +165,9 @@ class G05WsBackend:
         self._client: Any = None
 
     def connect(self) -> None:
+        if os.environ.get("ROBOTWIN_ENV_SITE"):
+            from host_runtime import configure_host_paths
+            configure_host_paths("ROBOTWIN_ENV_SITE")
         xpl = Path(self._robotwin_root) / "XPolicyLab"
         for p in (str(xpl), str(xpl / "integrations")):
             if p not in sys.path:

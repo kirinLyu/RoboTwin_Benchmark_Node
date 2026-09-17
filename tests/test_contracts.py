@@ -329,7 +329,7 @@ def test_expert_check_prefilters_and_redoes_setup(fake_unstable_error) -> None:
 
 def test_build_instruction_seen_matches_official_generation() -> None:
     """报告问题 4：seen 指令 = play_once episode_info 经官方生成器填充占位符。"""
-    robotwin_root = Path(os.path.expanduser("~/RoboTwin"))
+    robotwin_root = Path(os.environ.get("ROBOTWIN_ROOT", "~/RoboTwin")).expanduser()
     if not (robotwin_root / "description").is_dir():
         pytest.skip("RoboTwin 仓库不在本机，跳过 seen 指令生成测试")
     adapter = _bare_adapter(instruction_type="seen")
